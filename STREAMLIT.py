@@ -2,12 +2,12 @@
 """
 DAISE Prototype - robust Streamlit entrypoint.
 
-Behavior:
-- Prefer new google-genai SDK (from google import genai)
-- Fallback to legacy google.generativeai if new SDK not present
-- List available models and let user pick a supported one
-- Use SentenceTransformers for embeddings, FAISS if available (numpy fallback)
-- Read GEMINI_API_KEY from Streamlit secrets or environment
+Improvements applied:
+- Better handling of Google GenAI new vs legacy SDKs
+- If model not found, surface available models and allow manual entry
+- More robust generate call for new SDK (handles string/list contents)
+- Clearer error messages when model is unsupported
+- Keep SBERT/FAISS behavior unchanged
 """
 
 import os
@@ -42,7 +42,6 @@ GEN_CLIENT_KIND = None  # "new" or "legacy"
 # Try new SDK first
 try:
     from google import genai  # google-genai SDK
-    # create client only after key is acquired (below)
     GEN_CLIENT_KIND = "new"
 except Exception:
     # try legacy
@@ -53,15 +52,14 @@ except Exception:
         GEN_CLIENT_KIND = None
 
 # --- Streamlit page setup ---
-st.set_page_config(page_title="DAISE Prototype ", layout="wide")
+st.set_page_config(page_title="DAISE Prototype", layout="wide")
 st.title("DAISE – Early Innovation Discovery Prototype")
 
 # --- Read API key (secrets or env) ---
+
 def get_gemini_key() -> str:
     key = None
-    # st.secrets works only when running under streamlit runtime and when .streamlit/secrets.toml exists or secrets set in cloud
     try:
-        # using .get to avoid KeyError
         key = st.secrets.get("GEMINI_API_KEY") if st.secrets is not None else None
     except Exception:
         key = None
@@ -78,7 +76,6 @@ if not GEMINI_KEY:
 
 # Initialize whichever client is present
 if GEN_CLIENT_KIND == "new":
-    # new google-genai SDK
     try:
         from google import genai as genai_new
         client_new = genai_new.Client(api_key=GEMINI_KEY)
@@ -91,7 +88,6 @@ if GEN_CLIENT_KIND == "new":
 elif GEN_CLIENT_KIND == "legacy":
     try:
         import google.generativeai as legacy_genai  # type: ignore
-        # legacy configure style
         legacy_genai.configure(api_key=GEMINI_KEY)
         GEN_CLIENT = legacy_genai
         GEN_CLIENT_KIND = "legacy"
@@ -107,22 +103,18 @@ else:
 
 # --- Helper: list available models for the detected client ---
 def list_models_for_client() -> Tuple[list, str]:
-    """
-    Returns (list_of_model_names, label) where label describes the client kind.
-    """
     models = []
     label = GEN_CLIENT_KIND or "none"
     if GEN_CLIENT is None:
         return models, label
 
     if GEN_CLIENT_KIND == "new":
-        # new client: client.models.list() -> likely returns a sequence or object
         try:
+            # genai.Client.models.list() exists in the new SDK
             resp = GEN_CLIENT.models.list()
-            # resp may be an iterable of model objects or a dict-like
+            # resp may be iterable
             try:
                 for m in resp:
-                    # m might have .name or .model or 'name' key
                     if hasattr(m, "name"):
                         models.append(m.name)
                     elif isinstance(m, dict) and "name" in m:
@@ -130,7 +122,7 @@ def list_models_for_client() -> Tuple[list, str]:
                     else:
                         models.append(str(m))
             except TypeError:
-                # Maybe resp is a single object with .models
+                # maybe resp.models
                 if hasattr(resp, "models"):
                     for m in resp.models:
                         if hasattr(m, "name"):
@@ -141,27 +133,22 @@ def list_models_for_client() -> Tuple[list, str]:
                             models.append(str(m))
                 else:
                     models.append(str(resp))
-        except Exception as e:
-            # fallback: try known common model names (we will show these)
-            models = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
+        except Exception:
+            # fallback list of commonly expected names
+            models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
     elif GEN_CLIENT_KIND == "legacy":
         try:
-            # legacy client might have list_models() or list_models
             if hasattr(GEN_CLIENT, "list_models"):
                 lm = GEN_CLIENT.list_models()
-                # lm might be list of dicts
                 if isinstance(lm, (list, tuple)):
                     for m in lm:
                         if isinstance(m, dict) and "name" in m:
                             models.append(m["name"])
                         else:
-                            # the legacy lib often returns simple names
                             models.append(str(m))
                 else:
-                    # string or object
                     models.append(str(lm))
             elif hasattr(GEN_CLIENT, "models"):
-                # some versions expose models
                 lm = GEN_CLIENT.models()
                 if isinstance(lm, (list, tuple)):
                     models.extend([str(x) for x in lm])
@@ -185,19 +172,28 @@ if available_models:
 else:
     st.sidebar.warning("Could not list models programmatically; a few common model names are shown instead.")
 
+# Allow user to manually enter a model name if not present in auto list
+manual_model = st.sidebar.text_input("Manual model name (optional)")
+
 # Model selector - prefer recommended Gemini models when present
 default_candidates = []
-if "gemini-2.5-flash" in available_models:
-    default_candidates.append("gemini-2.5-flash")
-if "gemini-2.0-flash" in available_models:
-    default_candidates.append("gemini-2.0-flash")
-if "gemini-1.5-flash" in available_models:
-    default_candidates.append("gemini-1.5-flash")
-# fallback names for legacy
+for cand in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
+    if cand in available_models:
+        default_candidates.append(cand)
 if not default_candidates and available_models:
     default_candidates.append(available_models[0])
 
-model_choice = st.sidebar.selectbox("Model to use", options=default_candidates or ["auto"], index=0)
+# If no detected models, show an 'auto' and manual entry
+if not default_candidates:
+    default_candidates = ["auto"]
+
+model_choice = st.sidebar.selectbox("Model to use", options=default_candidates, index=0)
+
+# If user provided manual name, prefer it
+if manual_model:
+    chosen_model = manual_model.strip()
+else:
+    chosen_model = model_choice
 
 # --- Load SBERT once ---
 @st.cache_resource
@@ -215,14 +211,15 @@ def embed_texts(texts):
     emb = sbert.encode(texts, convert_to_numpy=True)
     return np.asarray(emb, dtype="float32")
 
+
 def build_faiss_index(embs: np.ndarray):
     dim = embs.shape[1]
     index = faiss.IndexFlatL2(dim)
     index.add(embs)
     return index
 
+
 def numpy_cosine_search(doc_embs: np.ndarray, q_emb: np.ndarray, top_k=1):
-    # doc_embs shape (N, dim), q_emb shape (dim,) or (1, dim)
     if q_emb.ndim == 2:
         q = q_emb[0]
     else:
@@ -234,16 +231,19 @@ def numpy_cosine_search(doc_embs: np.ndarray, q_emb: np.ndarray, top_k=1):
     return order[:top_k], sims[order[:top_k]]
 
 # --- Generation helpers that support both new and legacy clients ---
+
 def generate_with_new(prompt: str, model: str):
     """Use google-genai client (genai.Client)"""
+    # new SDK expects contents parameter (string or list)
     try:
-        resp = GEN_CLIENT.models.generate_content(model=model, contents=prompt)
-        # try common fields
+        contents = prompt
+        resp = GEN_CLIENT.models.generate_content(model=model, contents=contents)
         if hasattr(resp, "text") and resp.text:
             return resp.text
+        # candidates/content parsing
         if hasattr(resp, "candidates") and len(resp.candidates) > 0:
             c0 = resp.candidates[0]
-            # try to extract content parts
+            # try content items
             if hasattr(c0, "content"):
                 parts = []
                 for item in c0.content:
@@ -257,13 +257,13 @@ def generate_with_new(prompt: str, model: str):
                 return c0.text
         return str(resp)
     except Exception as e:
+        # bubble up for caller to handle; keep message intact
         raise
+
 
 def generate_with_legacy(prompt: str, model: str):
     """Use legacy google.generativeai"""
     try:
-        # Legacy libraries have different function names by versions.
-        # Try a few common patterns.
         if hasattr(GEN_CLIENT, "generate_text"):
             r = GEN_CLIENT.generate_text(model=model, prompt=prompt)
             if hasattr(r, "text"):
@@ -276,7 +276,6 @@ def generate_with_legacy(prompt: str, model: str):
                 return c.get("content", c.get("text", str(c)))
             return str(r)
         else:
-            # some legacy uses genai.chat.completions.create pattern
             if hasattr(GEN_CLIENT, "chat"):
                 r = GEN_CLIENT.chat.create(model=model, messages=[{"role": "user", "content": prompt}])
                 if isinstance(r, dict) and "candidates" in r:
@@ -286,8 +285,8 @@ def generate_with_legacy(prompt: str, model: str):
     except Exception as e:
         raise
 
+
 def generate_text(prompt: str, model: str):
-    """Unified generation call that uses new SDK if available else legacy"""
     if GEN_CLIENT_KIND == "new":
         return generate_with_new(prompt, model)
     elif GEN_CLIENT_KIND == "legacy":
@@ -303,9 +302,8 @@ ingest_button = st.sidebar.button("Clear ingested docs")
 if ingest_button:
     st.session_state.docs = []
 
-uploaded = st.file_uploader("Upload PDF or TXT (paper, patent, README)", type=["pdf", "txt"])
+uploaded = st.file_uploader("Upload PDF or TXT (paper, patent, README)", type=["pdf", "txt"]) 
 if uploaded:
-    # extract text
     text = ""
     if uploaded.name.lower().endswith(".pdf"):
         if pdfplumber is None:
@@ -330,7 +328,6 @@ if uploaded:
         st.write("Document preview:")
         st.write(text[:3000] + ("..." if len(text) > 3000 else ""))
 
-        # embed and store
         try:
             emb = embed_texts([text])  # shape (1, dim)
             st.session_state.docs.append({"text": text, "emb": emb})
@@ -342,7 +339,6 @@ if uploaded:
 if not st.session_state.docs:
     st.info("No documents ingested. Upload a PDF or TXT to start.")
 else:
-    # Build index / doc embeddings array
     doc_embs = np.vstack([d["emb"] for d in st.session_state.docs])
     if USE_FAISS:
         try:
@@ -354,25 +350,20 @@ else:
     else:
         index = None
 
-    # Query input
     query = st.text_input("Ask about the ingested documents (e.g., 'Summarize core innovation')")
 
-    # Provide model selection info: ensure model_choice is set to a valid model name acceptable to the client
-    chosen_model = model_choice
+    # If chosen_model is 'auto', resolve into a concrete model
     if chosen_model == "auto":
-        # pick a reasonable default
         if GEN_CLIENT_KIND == "new":
-            # prefer gemini-2.0-flash if available
-            if "gemini-2.0-flash" in available_models:
+            if "gemini-2.5-flash" in available_models:
+                chosen_model = "gemini-2.5-flash"
+            elif "gemini-2.0-flash" in available_models:
                 chosen_model = "gemini-2.0-flash"
-            elif "gemini-1.5-flash" in available_models:
-                chosen_model = "gemini-1.5-flash"
             elif available_models:
                 chosen_model = available_models[0]
             else:
                 chosen_model = "gemini-2.0-flash"
         else:
-            # legacy defaults
             if "text-bison-001" in available_models:
                 chosen_model = "text-bison-001"
             elif available_models:
@@ -381,7 +372,6 @@ else:
                 chosen_model = "text-bison-001"
 
     if query:
-        # search nearest doc
         q_emb = embed_texts([query])
         try:
             if index is not None and USE_FAISS:
@@ -398,7 +388,6 @@ else:
             st.error(f"Search failed: {e}")
             matched_text = st.session_state.docs[0]["text"]
 
-        # Build clear prompt for the model
         prompt = (
             "You are an investment analyst AI. Read the DOCUMENT and answer the USER QUESTION concisely.\n\n"
             "DOCUMENT:\n" + matched_text + "\n\n"
@@ -409,16 +398,20 @@ else:
             "3) One recommended next action for an analyst.\n"
         )
 
-        # Call the model
+        # Call the model with a robust error handler
         try:
             out = generate_text(prompt=prompt, model=chosen_model)
             st.subheader("AI Answer")
             st.write(out)
         except Exception as e:
             st.error(f"Model call failed: {type(e).__name__}: {e}")
-            # If NotFound, encourage user to pick different model
-            if "NotFound" in str(e) or "not found" in str(e).lower():
-                st.error("Model not found for this client/API combination. Try picking another model in the sidebar or check your client type.")
+            msg = str(e).lower()
+            if "not found" in msg or "not_found" in msg or "404" in msg:
+                st.error("Model not found for this client/API combination.")
+                if available_models:
+                    st.info("Please pick one of the models listed in the sidebar or paste a valid model name in 'Manual model name'.")
+                else:
+                    st.info("No models were discovered programmatically. Use the Manual model name field to try a known model like 'gemini-2.5-flash' or 'text-bison-001'.")
 
         # Scoring prompt
         score_prompt = (
@@ -431,7 +424,6 @@ else:
 
         try:
             score_out = generate_text(prompt=score_prompt, model=chosen_model)
-            # Try to extract JSON from model output
             parsed = None
             try:
                 s = score_out
