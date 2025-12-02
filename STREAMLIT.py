@@ -9,7 +9,7 @@ genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
-st.title("DAISE – Early Innovation Discovery Prototype (Gemini Edition)")
+st.title("DAISE – Early Innovation Discovery Prototype ")
 
 uploaded_file = st.file_uploader("Upload paper/patent/GitHub README", type=["pdf", "txt"])
 
