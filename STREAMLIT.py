@@ -53,7 +53,7 @@ except Exception:
         GEN_CLIENT_KIND = None
 
 # --- Streamlit page setup ---
-st.set_page_config(page_title="DAISE Prototype (Gemini)", layout="wide")
+st.set_page_config(page_title="DAISE Prototype ", layout="wide")
 st.title("DAISE – Early Innovation Discovery Prototype")
 
 # --- Read API key (secrets or env) ---
