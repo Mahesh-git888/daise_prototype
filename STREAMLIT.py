@@ -39,7 +39,7 @@ def load_sbert():
 sbert = load_sbert()
 
 # --- UI: model selector ---
-model_choice = st.selectbox("Select Gemini model (demo)", ["gemini-2.0-flash", "gemini-1.5-flash"])
+model_choice = st.selectbox("Select Gemini model (demo)", ["gemini-2.0-flash"])
 
 # --- File upload ---
 uploaded_file = st.file_uploader("Upload paper / patent / GitHub README (pdf or txt)", type=["pdf", "txt"])
