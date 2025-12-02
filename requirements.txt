@@ -1,6 +1,16 @@
+# core
 streamlit==1.51.0
-sentence-transformers==2.2.2
-google-genai==0.12.0
-pdfplumber==0.11.8
-numpy==2.3.5
+
+# embeddings & models
+sentence-transformers
 torch
+numpy
+
+# pdf/text
+pdfplumber
+
+# prefer faiss if you can install it; Streamlit Cloud sometimes installs it
+faiss-cpu
+
+# new official Google GenAI SDK (choose a version that exists in your logs)
+google-genai==1.52.0
